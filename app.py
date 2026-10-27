@@ -1,161 +1,133 @@
-import os
-import sqlite3
-import uuid
-from datetime import datetime
-from pathlib import Path
+import io
+import zipfile
+from urllib.parse import urlsplit, urlunsplit, urlencode
 import streamlit as st
+import qrcode
+from supabase import create_client
 
-st.set_page_config(page_title="KHUR | 공대 열람실", page_icon="📚", layout="centered")
-DB = Path(os.environ.get("KHUR_DB_PATH", "khur_demo.sqlite3"))
-DB.parent.mkdir(parents=True, exist_ok=True)
-
-def connect():
-    con = sqlite3.connect(DB, timeout=15)
-    con.execute("PRAGMA busy_timeout=15000")
-    return con
-
-def init():
-    with connect() as con:
-        con.execute("CREATE TABLE IF NOT EXISTS seats (id TEXT PRIMARY KEY)")
-        con.execute("CREATE TABLE IF NOT EXISTS bookings (seat TEXT PRIMARY KEY REFERENCES seats(id), token TEXT UNIQUE NOT NULL, expires INTEGER NOT NULL)")
-        con.executemany("INSERT OR IGNORE INTO seats VALUES (?)", [(f"A{i:02d}",) for i in range(1,21)])
-
-def snapshot(token):
-    with connect() as con:
-        con.execute("DELETE FROM bookings WHERE expires <= ?", (int(datetime.now().timestamp()),))
-        rows=con.execute("SELECT seat,token,expires FROM bookings").fetchall()
-    occupied={r[0]:r for r in rows}
-    mine=next((r for r in rows if r[1]==token),None)
-    return occupied,mine
-
-def book(token,seat):
-    con=connect()
-    try:
-        con.execute("BEGIN IMMEDIATE")
-        now=int(datetime.now().timestamp())
-        con.execute("DELETE FROM bookings WHERE expires <= ?", (now,))
-        row=con.execute("SELECT token FROM bookings WHERE seat=?",(seat,)).fetchone()
-        if row and row[0]!=token:
-            con.rollback()
-            return False,"다른 이용자가 먼저 등록했습니다. 기존 좌석은 유지됩니다."
-        if row:
-            con.rollback()
-            return False,"이미 이용 중인 좌석입니다."
-        con.execute("DELETE FROM bookings WHERE token=?",(token,))
-        con.execute("INSERT INTO bookings VALUES (?,?,?)",(seat,token,now+7200))
-        con.commit()
-        return True,f"{seat} 좌석 등록이 완료되었습니다."
-    except Exception:
-        con.rollback()
-        raise
-    finally:
-        con.close()
-
-def release(token):
-    with connect() as con:
-        con.execute("DELETE FROM bookings WHERE token=?",(token,))
-
-init()
-if "token" not in st.session_state:
-    st.session_state.token=uuid.uuid4().hex
-token=st.session_state.token
-st.markdown("""<style>
-.stApp{background:#faf7f2;} h1,h2,h3{color:#751d32;}
-div.stButton > button[kind=primary]{background:#751d32;border-color:#751d32;color:white;}
-.block-container{max-width:760px;padding-top:2rem;}
-</style>""",unsafe_allow_html=True)
+st.set_page_config(page_title="KHUR · 좌석 QR 등록",page_icon="📚",layout="centered")
+st.markdown("<style>.stApp{background:#faf7f2}.block-container{max-width:650px}h1,h2,h3{color:#781f36}div.stButton>button[kind=primary]{background:#781f36;border-color:#781f36;color:white}</style>",unsafe_allow_html=True)
 st.title("KHUR")
-st.caption("공대 열람실 · 원하는 자리에서 바로 등록하고, 간편하게 변경하세요.")
-st.warning("경진대회 시연용입니다. 학교 공식 서비스가 아니며 실제 좌석 예약에 사용하지 마세요.")
-if "notice" in st.session_state:
-    st.success(st.session_state.pop("notice"))
-occupied,mine=snapshot(token)
-page=st.radio("메뉴",["좌석 등록·변경","내 좌석","QR 만들기","이용 안내"],horizontal=True)
-seats=[f"A{i:02d}" for i in range(1,21)]
-requested=st.query_params.get("seat","A01")
-if requested not in seats:
-    st.error("유효하지 않은 좌석 QR입니다.")
+st.caption("두리서 · 공대 열람실 좌석 QR 등록·변경")
+st.caption("경진대회 시제품 · 학교 공식 서비스가 아닙니다.")
+try:
+    url=st.secrets["SUPABASE_URL"]
+    key=st.secrets["SUPABASE_ANON_KEY"]
+except (KeyError,FileNotFoundError):
+    st.info("앱 설정이 필요합니다. README에 따라 Supabase를 만들고 배포 설정의 Secrets에 주소와 공개 키를 입력하세요.")
     st.stop()
 
-if page=="좌석 등록·변경":
-    st.subheader("공대 열람실")
-    st.metric("이용 가능한 좌석",f"{20-len(occupied)} / 20")
-    st.caption("입구 ↓ · 예시 배치도(실제 열람실 배치와 다릅니다)")
-    for start in range(0,20,4):
-        cols=st.columns(4)
-        for col,seat in zip(cols,seats[start:start+4]):
-            row=occupied.get(seat)
-            label="내 좌석" if row and row[1]==token else "이용 중" if row else "이용 가능"
-            if col.button(f"{seat}\n{label}",key=seat,use_container_width=True):
-                st.query_params["seat"]=seat
-                st.rerun()
-    st.divider()
-    st.subheader(f"선택한 좌석: {requested}")
-    if mine:
-        st.info(f"현재 내 좌석: {mine[0]} · 다른 빈 좌석을 등록하면 기존 좌석은 자동 반납됩니다.")
-    row=occupied.get(requested)
-    if row and row[1]==token:
-        st.success("현재 이용 중인 좌석입니다.")
-    elif row:
-        st.error("현재 다른 이용자가 사용 중입니다.")
-    elif st.button("이 좌석으로 변경하기" if mine else "이 좌석 이용하기",type="primary",use_container_width=True):
-        ok,message=book(token,requested)
-        if ok:
-            st.session_state.notice=message
-            st.rerun()
-        else:
-            st.error(message)
-    if st.button("좌석 현황 새로고침",use_container_width=True):
-        st.rerun()
+# Each Streamlit browser session gets its own client; never share auth clients across users.
+if "sb" not in st.session_state:
+    st.session_state.sb=create_client(url,key)
+sb=st.session_state.sb
+seats=[f"A{i:02d}" for i in range(1,21)]
+seat=st.query_params.get("seat")
+if seat is not None and seat not in seats:
+    st.error("등록되지 않은 좌석 QR입니다. 좌석에 붙은 QR을 다시 확인하세요.")
+    st.stop()
 
-elif page=="내 좌석":
-    st.subheader("내 이용 정보")
-    if mine:
-        st.metric("이용 중인 좌석",mine[0])
-        remaining=max(0,(mine[2]-int(datetime.now().timestamp()))//60)
-        st.write(f"남은 시간: 약 {remaining}분 · 이용 시간 2시간")
-        st.caption("남은 시간은 화면을 새로고침할 때 갱신됩니다.")
-        if st.button("좌석 반납하기",type="primary",use_container_width=True):
-            release(token)
-            st.session_state.notice="좌석을 반납했습니다."
-            st.rerun()
-    else:
-        st.info("현재 이용 중인 좌석이 없습니다.")
-    if st.button("이용 정보 새로고침"):
-        st.rerun()
-
-elif page=="QR 만들기":
-    import io
-    from urllib.parse import urlsplit,urlunsplit,urlencode
-    import qrcode
-    st.subheader("좌석별 QR 생성")
-    st.caption("배포가 완료된 앱 주소를 입력하세요. QR에는 좌석 번호만 포함됩니다.")
-    base=st.text_input("배포된 KHUR 주소",placeholder="https://your-app.streamlit.app")
-    target=st.selectbox("QR을 만들 좌석",seats)
+with st.expander("좌석 QR 출력 도구"):
+    st.caption("운영 준비용 공개 도구입니다. 예약 정보나 관리 권한은 노출하지 않습니다.")
+    base=st.text_input("배포된 앱 주소",placeholder="https://your-app.streamlit.app")
     if base:
-        parts=urlsplit(base.strip())
-        if parts.scheme not in ("http","https") or not parts.netloc:
-            st.error("http:// 또는 https://로 시작하는 앱 주소를 입력하세요.")
+        p=urlsplit(base.strip())
+        if p.scheme not in ("https","http") or not p.netloc:
+            st.error("올바른 앱 주소를 입력하세요.")
         else:
-            link=urlunsplit((parts.scheme,parts.netloc,parts.path,urlencode({"seat":target}),""))
-            out=io.BytesIO()
-            qrcode.make(link).save(out,format="PNG")
-            st.image(out.getvalue(),caption=f"KHUR · {target}",width=240)
+            qr_seat=st.selectbox("좌석",seats)
+            def qr_bytes(s):
+                link=urlunsplit((p.scheme,p.netloc,p.path,urlencode({"seat":s}),""))
+                b=io.BytesIO();qrcode.make(link).save(b,format="PNG")
+                return b.getvalue(),link
+            image,link=qr_bytes(qr_seat)
+            st.image(image,width=220,caption=f"공대 열람실 {qr_seat}")
             st.code(link,language=None)
-            st.download_button("QR 이미지 다운로드",out.getvalue(),file_name=f"KHUR_{target}.png",mime="image/png")
+            st.download_button("이 좌석 QR 다운로드",image,f"KHUR_{qr_seat}.png","image/png")
+            if st.button("20개 좌석 QR ZIP 준비"):
+                out=io.BytesIO()
+                with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
+                    for s in seats:z.writestr(f"KHUR_{s}.png",qr_bytes(s)[0])
+                st.download_button("전체 QR ZIP 다운로드",out.getvalue(),"KHUR_QR_20.zip","application/zip")
 
+if seat:
+    st.subheader(f"공대 열람실 · {seat} 좌석")
+    st.write("방금 스캔한 좌석입니다. 번호를 확인한 후 이용을 등록하세요.")
 else:
-    st.subheader("이용 안내")
-    st.markdown("""1. 원하는 좌석의 QR을 스캔합니다.
-2. 좌석 번호를 확인하고 **이 좌석 이용하기**를 누릅니다.
-3. 이동하려면 새 좌석 QR을 스캔한 뒤 **변경하기**를 누릅니다.
-4. 이용 종료 시 **내 좌석 → 좌석 반납하기**를 누릅니다.
+    st.subheader("원하는 좌석의 QR을 스캔하세요")
+    st.write("좌석 QR을 스캔하면 해당 좌석의 등록 화면으로 연결됩니다. 여기에서는 내 좌석 확인과 반납이 가능합니다.")
 
-- 한 세션당 한 좌석, 한 좌석당 한 세션만 등록할 수 있습니다.
-- 이용 시간은 2시간이며, 만료 기록은 다음 조회·등록 때 정리됩니다.
-- 현황은 자동 갱신되지 않습니다. 최신 상태는 새로고침으로 확인하세요.
-- 정적 QR은 현장 방문을 증명하지 않습니다.
-""")
+session=sb.auth.get_session()
+if not session:
+    st.info("좌석 등록에는 로그인이 필요합니다. 다른 좌석 QR을 스캔한 뒤 같은 계정으로 로그인하면 기존 좌석을 이어서 변경할 수 있습니다.")
+    tabs=st.tabs(["로그인","회원가입"])
+    with tabs[0]:
+        with st.form("login"):
+            email=st.text_input("이메일")
+            password=st.text_input("비밀번호",type="password")
+            submit=st.form_submit_button("로그인",use_container_width=True)
+        if submit:
+            try:
+                sb.auth.sign_in_with_password({"email":email.strip(),"password":password})
+                st.rerun()
+            except Exception:
+                st.error("로그인할 수 없습니다. 계정 정보와 이메일 인증 여부를 확인하세요.")
+    with tabs[1]:
+        st.caption("시연 시에는 Supabase에서 미리 생성한 테스트 계정을 사용하는 것이 편리합니다. 실제 학교 비밀번호를 입력하지 마세요.")
+        with st.form("signup"):
+            email_new=st.text_input("가입 이메일")
+            pass_new=st.text_input("가입 비밀번호 (8자 이상)",type="password")
+            submit_new=st.form_submit_button("계정 만들기")
+        if submit_new:
+            if len(pass_new)<8:
+                st.error("비밀번호는 8자 이상 입력하세요.")
+            else:
+                try:
+                    result=sb.auth.sign_up({"email":email_new.strip(),"password":pass_new})
+                    if result.session:st.rerun()
+                    st.success("가입 요청을 처리했습니다. 이메일 확인이 설정되어 있다면 메일에서 인증 후 로그인하세요.")
+                except Exception:
+                    st.error("가입 요청을 처리하지 못했습니다. 입력 정보와 인증 설정을 확인하세요.")
+    st.stop()
+
+st.caption(f"로그인 계정: {session.user.email}")
+if st.button("로그아웃"):
+    sb.auth.sign_out()
+    st.rerun()
+try:
+    data=sb.rpc("khur_status",{}).execute().data
+    mine=data.get("mine")
+    occupied=set(data.get("occupied",[]))
+except Exception:
+    st.error("좌석 정보를 읽지 못했습니다. Supabase SQL 실행 여부와 설정을 확인하세요.")
+    st.stop()
+if "message" in st.session_state:st.success(st.session_state.pop("message"))
+if mine:
+    st.info(f"현재 내 좌석: {mine['seat_id']} · 종료 예정: {mine['ends_at']} (UTC)")
+else:st.info("현재 이용 중인 좌석이 없습니다.")
+if seat:
+    if mine and mine['seat_id']==seat:
+        st.success("이미 이용 중인 내 좌석입니다.")
+    elif seat in occupied:
+        st.warning("다른 이용자가 사용 중인 좌석입니다. 기존 내 좌석은 유지됩니다.")
+    else:
+        if mine:st.write(f"변경하면 {mine['seat_id']} 좌석은 자동 반납됩니다.")
+        if st.button("이 좌석으로 변경하기" if mine else "이 좌석 이용하기",type="primary",use_container_width=True):
+            try:
+                result=sb.rpc("khur_book",{"p_seat":seat}).execute().data
+                if result.get("ok"):
+                    st.session_state.message=result["message"]
+                    st.rerun()
+                else:st.warning(result.get("message","등록하지 못했습니다."))
+            except Exception:
+                st.error("등록 요청을 처리하지 못했습니다. 새로고침 후 내 좌석을 먼저 확인하세요.")
+if mine and st.button("내 좌석 반납하기",use_container_width=True):
+    try:
+        sb.rpc("khur_release",{}).execute()
+        st.session_state.message="좌석을 반납했습니다."
+        st.rerun()
+    except Exception:st.error("반납하지 못했습니다. 내 좌석을 다시 확인하세요.")
+if st.button("이용 정보 새로고침",use_container_width=True):st.rerun()
 st.divider()
-st.caption("두리서 · KHUR 데모 | 로그인 없는 브라우저 세션 기반 시제품")
-st.caption("새로고침·QR 재접속으로 세션이 바뀌면 기존 이용 정보를 찾지 못할 수 있습니다. 이 경우 기존 좌석은 만료 후 해제됩니다. 배포 서버 재시작 시 데이터도 초기화될 수 있습니다.")
+st.caption("이용 시간 2시간 · 한 계정당 한 좌석 · 현황은 새로고침 시 갱신됩니다. QR은 현장 방문을 증명하지 않습니다.")
+st.caption("보안상 로그인은 현재 연결 세션에서만 유지됩니다. QR을 다시 열거나 새로고침하면 재로그인이 필요할 수 있지만 같은 계정의 좌석 기록은 유지됩니다.")
