@@ -1,4 +1,8 @@
 import io
+import base64
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import zipfile
 from urllib.parse import urlsplit, urlunsplit, urlencode
 import streamlit as st
@@ -44,9 +48,15 @@ p,label,button{letter-spacing:-.025em}
 .brand-foot{border-top:1px solid var(--line);margin-top:28px;padding-top:18px;display:flex;justify-content:space-between;color:var(--muted);font-size:10px;line-height:1.8}
 @media(max-width:480px){.block-container{padding:1.3rem 1.1rem 2rem}.hero h1{font-size:27px!important}.seat-number{font-size:42px}[data-testid="stForm"]{padding:18px}}
 </style>
-<div class="brand-head"><div class="wordmark">KHUR<small>YOUR SEAT. YOUR FOCUS.</small></div><div class="brand-pill">공대 열람실</div></div>
-<div class="hero"><div class="eyebrow">KYUNG HEE · READING ROOM</div><h1>좋은 자리가<br>좋은 하루를 만든다.</h1><p>마음에 드는 자리에서 QR을 스캔하세요.<br>자리 등록부터 변경까지, 그 자리에서 간편하게.</p></div>
+
 """,unsafe_allow_html=True)
+logo_path=Path(__file__).parent / "assets" / "khur_logo.png"
+if logo_path.exists():
+    encoded=base64.b64encode(logo_path.read_bytes()).decode()
+    st.markdown(f'<div style="text-align:center;margin:0 0 24px"><img src="data:image/png;base64,{encoded}" style="width:210px;max-width:65%;border-radius:16px" alt="KHUR 경희대학교 공대 열람실"></div>',unsafe_allow_html=True)
+else:
+    st.warning("assets/khur_logo.png 파일을 함께 업로드해주세요.")
+st.markdown('<div class="hero"><div class="eyebrow">KYUNG HEE · READING ROOM</div><h1>좋은 자리가<br>좋은 하루를 만든다.</h1><p>마음에 드는 자리에서 QR을 스캔하세요.<br>자리 등록부터 변경까지, 그 자리에서 간편하게.</p></div>',unsafe_allow_html=True)
 try:
     url=st.secrets["SUPABASE_URL"]
     key=st.secrets["SUPABASE_ANON_KEY"]
@@ -58,15 +68,22 @@ except (KeyError,FileNotFoundError):
 if "sb" not in st.session_state:
     st.session_state.sb=create_client(url,key)
 sb=st.session_state.sb
-seats=[f"A{i:02d}" for i in range(1,21)]
+ROOMS={"1":138,"2":48}
+seats=[f"R{r}-{i:03d}" for r,n in ROOMS.items() for i in range(1,n+1)]
+def seat_label(s):
+    if s and s in seats:
+        r,n=s[1:].split("-")
+        return f"제{r}열람실 · {int(n)}번"
+    return str(s)
 seat=st.query_params.get("seat")
+
 if seat is not None and seat not in seats:
     st.error("등록되지 않은 좌석 QR입니다. 좌석에 붙은 QR을 다시 확인하세요.")
     st.stop()
 
 
 if seat:
-    st.markdown(f"""<div class="seat-card"><div class="seat-top"><span>공과대학 열람실</span><span class="seat-tag">SCANNED SEAT</span></div><div class="seat-main"><div class="seat-icon">▤</div><div><div class="seat-number">{seat}</div><div class="seat-sub">방금 스캔한 좌석</div></div></div><div class="seat-bottom">좌석 번호를 확인해주세요. 로그인 후 이용 가능 여부를 확인하고 등록할 수 있습니다.</div></div>""",unsafe_allow_html=True)
+    st.markdown(f"""<div class="seat-card"><div class="seat-top"><span>제{seat[1]}열람실 · 공과대학</span><span class="seat-tag">SCANNED SEAT</span></div><div class="seat-main"><div class="seat-icon">▤</div><div><div class="seat-number">{int(seat.split("-")[1])}번</div><div class="seat-sub">방금 스캔한 좌석</div></div></div><div class="seat-bottom">좌석 번호를 확인해주세요. 로그인 후 이용 가능 여부를 확인하고 등록할 수 있습니다.</div></div>""",unsafe_allow_html=True)
 else:
     st.markdown("""<div class="seat-card"><div class="seat-top"><span>좌석 이용 안내</span><span class="seat-tag">SCAN &amp; SIT</span></div><div class="seat-main"><div class="seat-icon">⌗</div><div><div style="font-size:21px;font-weight:750;color:#651021">내 자리는 QR로 간편하게</div><div class="seat-sub">이용할 좌석에 부착된 QR을 스캔하세요.</div></div></div><div class="seat-bottom">01 QR 스캔 &nbsp; → &nbsp; 02 로그인 &nbsp; → &nbsp; 03 좌석 등록<br>이미 이용 중이라면 로그인 후 내 좌석을 확인하거나 반납할 수 있습니다.</div></div>""",unsafe_allow_html=True)
 
@@ -78,20 +95,22 @@ with st.expander("좌석 QR 출력 도구"):
         if p.scheme not in ("https","http") or not p.netloc:
             st.error("올바른 앱 주소를 입력하세요.")
         else:
-            qr_seat=st.selectbox("좌석",seats)
+            qr_room=st.selectbox("QR 출력 열람실",list(ROOMS),format_func=lambda r:f"제{r}열람실 ({ROOMS[r]}석)")
+            room_seats=[s for s in seats if s.startswith(f"R{qr_room}-")]
+            qr_seat=st.selectbox("좌석",room_seats,format_func=seat_label)
             def qr_bytes(s):
                 link=urlunsplit((p.scheme,p.netloc,p.path,urlencode({"seat":s}),""))
                 b=io.BytesIO();qrcode.make(link).save(b,format="PNG")
                 return b.getvalue(),link
             image,link=qr_bytes(qr_seat)
-            st.image(image,width=220,caption=f"공대 열람실 {qr_seat}")
+            st.image(image,width=220,caption=seat_label(qr_seat))
             st.code(link,language=None)
             st.download_button("이 좌석 QR 다운로드",image,f"KHUR_{qr_seat}.png","image/png")
-            if st.button("20개 좌석 QR ZIP 준비"):
+            if st.button("선택 열람실 QR ZIP 준비"):
                 out=io.BytesIO()
                 with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
-                    for s in seats:z.writestr(f"KHUR_{s}.png",qr_bytes(s)[0])
-                st.download_button("전체 QR ZIP 다운로드",out.getvalue(),"KHUR_QR_20.zip","application/zip")
+                    for s in room_seats:z.writestr(f"KHUR_{s}.png",qr_bytes(s)[0])
+                st.download_button("전체 QR ZIP 다운로드",out.getvalue(),f"KHUR_R{qr_room}_QR.zip","application/zip")
 
 st.caption("두리서 · 경진대회 시제품 / 학교 공식 서비스가 아닙니다.")
 
@@ -139,9 +158,54 @@ try:
 except Exception:
     st.error("좌석 정보를 읽지 못했습니다. Supabase SQL 실행 여부와 설정을 확인하세요.")
     st.stop()
+
+# 좌석 번호는 첨부 사진에서 전사. 색상은 사진이 아닌 DB 현황을 사용합니다.
+LAYOUT={
+ "1":[
+  [[130,131,132,121,122,123],[133,134,135,124,125,126],[136,137,138,127,128,129]],
+  [[112,113,114,103,104,105],[115,116,117,106,107,108],[118,119,120,109,110,111]],
+  [[94,95,96,85,86,87],[97,98,99,88,89,90],[100,101,102,91,92,93]],
+  [[76,77,78,67,68,69],[79,80,81,70,71,72],[82,83,84,73,74,75]],
+  [[58,59,60,49,50,51],[61,62,63,52,53,54],[64,65,66,55,56,57]],
+  [[40,41,42,31,32,33],[43,44,45,34,35,36],[46,47,48,37,38,39]],
+  [[22,23,24,13,14,15],[25,26,27,16,17,18],[28,29,30,19,20,21]],
+  [[],[7,8,9,1,2,3],[10,11,12,4,5,6]]
+ ],
+ "2":[
+  [[4,5,6,10,11,12],[1,2,3,7,8,9]],
+  [[16,17,18,22,23,24],[13,14,15,19,20,21]],
+  [[28,29,30,34,35,36],[25,26,27,31,32,33]],
+  [[40,41,42,46,47,48],[37,38,39,43,44,45]]
+ ]
+}
+def render_map(room,occupied,mine):
+    blocks=[]
+    for row in LAYOUT[room]:
+        ds=[]
+        for desk in row:
+            cells=[]
+            for n in desk:
+                sid=f"R{room}-{n:03d}"
+                color="#93152a" if mine and mine['seat_id']==sid else ("#aaa09f" if sid in occupied else "#fffdfb")
+                ink="#fff" if sid in occupied or (mine and mine['seat_id']==sid) else "#651021"
+                cells.append(f'<div style="background:{color};color:{ink};border:1px solid #dbcac3;border-radius:5px;text-align:center;padding:8px 0;font-size:12px;font-weight:600">{n}</div>')
+            ds.append('<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:3px;min-height:65px">'+''.join(cells)+'</div>')
+        blocks.append(f'<div style="display:grid;grid-template-columns:repeat({len(row)},1fr);gap:18px;margin-bottom:17px">'+''.join(ds)+'</div>')
+    st.markdown('<div style="border:2px solid #cbbab4;padding:20px 12px 6px;border-radius:16px;background:#f2ece5">'+''.join(blocks)+'<div style="text-align:center;font-size:12px;color:#80676b;padding:10px">출입구 ↓</div></div>',unsafe_allow_html=True)
+
+st.subheader("열람실 좌석 현황")
+room=st.radio("열람실 선택",list(ROOMS),format_func=lambda r:f"제{r}열람실 · {ROOMS[r]}석",horizontal=True,index=0 if not seat or seat[1]=="1" else 1)
+used=sum(s.startswith(f"R{room}-") for s in occupied)
+c1,c2,c3=st.columns(3)
+c1.metric("전체 좌석",ROOMS[room]);c2.metric("이용 가능",ROOMS[room]-used);c3.metric("이용 중",used)
+st.caption("아이보리: 이용 가능 · 회색: 이용 중 · 버건디: 내 좌석 / 배치도는 조회용이며 좌석 QR로 등록합니다.")
+render_map(room,occupied,mine)
+st.caption("사진을 기준으로 번호와 책상 묶음을 재구성했습니다. 실제 통로 폭·방 비율·부대공간은 축척 재현이 아닙니다.")
+
 if "message" in st.session_state:st.success(st.session_state.pop("message"))
 if mine:
-    st.info(f"현재 내 좌석: {mine['seat_id']} · 종료 예정: {mine['ends_at']} (UTC)")
+    end_local=datetime.fromisoformat(mine["ends_at"].replace("Z","+00:00")).astimezone(ZoneInfo("Asia/Seoul"))
+    st.info(f"현재 내 좌석: {seat_label(mine['seat_id'])} · 종료 예정: {end_local:%m/%d %H:%M} (한국시간)")
 else:st.info("현재 이용 중인 좌석이 없습니다.")
 if seat:
     if mine and mine['seat_id']==seat:
@@ -149,7 +213,7 @@ if seat:
     elif seat in occupied:
         st.warning("다른 이용자가 사용 중인 좌석입니다. 기존 내 좌석은 유지됩니다.")
     else:
-        if mine:st.write(f"변경하면 {mine['seat_id']} 좌석은 자동 반납됩니다.")
+        if mine:st.write(f"변경하면 {seat_label(mine['seat_id'])} 좌석은 자동 반납됩니다.")
         if st.button("이 좌석으로 변경하기" if mine else "이 좌석 이용하기",type="primary",use_container_width=True):
             try:
                 result=sb.rpc("khur_book",{"p_seat":seat}).execute().data

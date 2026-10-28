@@ -3,7 +3,10 @@ create table if not exists public.khur_seats (
  id text primary key
 );
 insert into public.khur_seats(id)
-select 'A' || lpad(i::text,2,'0') from generate_series(1,20) i
+select 'R1-' || lpad(i::text,3,'0') from generate_series(1,138) i
+on conflict do nothing;
+insert into public.khur_seats(id)
+select 'R2-' || lpad(i::text,3,'0') from generate_series(1,48) i
 on conflict do nothing;
 create table if not exists public.khur_bookings (
  seat_id text primary key references public.khur_seats(id),
@@ -36,7 +39,7 @@ begin
  if uid is null then raise exception 'Authentication required'; end if;
  -- Serialize all changes in this small demo room, including switches and returns.
  perform pg_catalog.pg_advisory_xact_lock(746821);
- if not exists(select 1 from public.khur_seats where id=p_seat) then
+ if not exists(select 1 from public.khur_seats where id=p_seat) or not (p_seat ~ '^R1-(00[1-9]|0[1-9][0-9]|1[0-2][0-9]|13[0-8])$' or p_seat ~ '^R2-(00[1-9]|0[1-3][0-9]|04[0-8])$') then
   return jsonb_build_object('ok',false,'message','등록되지 않은 좌석입니다.');
  end if;
  delete from public.khur_bookings where ends_at<=now();
